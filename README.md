@@ -1,130 +1,85 @@
-# fleet-template-v1
+# Blazor template
 
-## What This Template Is
+Provisioned from [`Qode-Fleet-Control/fleet-template-v1`](https://github.com/Qode-Fleet-Control/fleet-template-v1) — the fleet
+lifecycle contract (`bin/`, `fleet.conf`, `compose.yaml`, deploy workflows) with the stock
+Blazor Web App (.NET 10, interactive server rendering) laid on top.
 
-`fleet-template-v1` is a **language-agnostic app lifecycle harness** for apps
-managed by the fleet platform. It gives any app — Node, Python, Go, a Docker
-Compose stack, anything — a uniform way to be deployed and controlled, without
-the fleet needing to know a single thing about your stack.
+    src/BlazorApp/      the Blazor Web App (Components/, wwwroot/, Program.cs)
+    Dockerfile          SDK build stage -> aspnet:10.0 runtime, non-root
+    compose.yaml        the fleet's docker runtime (service `app`)
+    fleet.conf          the app manifest every bin/ script reads
 
-The fleet injects runtime variables into the environment (`PORT`, `BASE_PATH`,
-`DATABASE_URL`) and calls `./bin/run` to deploy. Everything project-specific —
-how to install, build, and start your app — lives in **one file: `fleet.conf`**.
-That is the only file you edit per project.
+Pages: `/` (Home), `/counter` (interactive, over the Blazor circuit's WebSocket),
+`/weather` (streaming rendering). `GET /health` is the fleet's `HEALTH_PATH`.
 
-## Repository Structure
+## Origin
 
-```
-fleet.conf        ← the only file you edit per project
-.env              ← local-only env vars (gitignored)
-bin/
-  _common.sh      ← shared logic; never edit this
-  run             ← install + build + start (called by the fleet)
-  start           ← start only (no rebuild)
-  restart         ← stop + full run
-  reload          ← hot-reload config without rebuild
-  stop            ← stop the running process
-```
+Generated 2026-10-05 with the official template, inside the official SDK image (.NET SDK 10.0.401):
 
-## The One File You Edit: `fleet.conf`
+    docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp -v "$PWD":/w -w /w \
+      mcr.microsoft.com/dotnet/sdk:10.0 \
+      dotnet new blazor -n BlazorApp -o src/BlazorApp --framework net10.0
 
-`fleet.conf` is sourced as shell by the lifecycle scripts. Fill in the commands
-for your stack; leave any command empty (`''`) to skip that step.
+## Running it
 
-```sh
-NAME="my-app"           # label shown in fleet logs
-PORT="3000"             # default port (fleet overrides via $PORT env var)
-HEALTH_PATH="/"         # HTTP path that returns 200 when the app is ready
+**On the fleet** — nothing to do: the fleet clones the repo, injects `PORT` / `DATABASE_URL`, and
+runs `bin/run`, which (docker runtime) does `docker compose build` then
+`docker compose up --remove-orphans` in the foreground. The app listens on `0.0.0.0:$PORT` and
+is served at the root of its own hostname (`https://<hash>.<FLEET_APP_DOMAIN>/`); every URL
+the template emits is root-relative (`<base href="/">`).
 
-INSTALL_CMD='npm ci'
-BUILD_CMD='npm run build'
-START_CMD='node dist/server.js'   # must listen on $PORT; run in foreground
-RELOAD_CMD=''           # optional; empty → falls back to stop+start
-```
+**With docker**
 
-> **Critical rule:** single-quote any command that uses `$PORT` or
-> `$BASE_PATH`. Single quotes defer variable expansion to **runtime** — when the
-> command actually runs, with the fleet-injected value — rather than at the
-> moment `fleet.conf` is sourced (when those values aren't set yet). Use
-> `START_CMD='gunicorn app:app --bind 0.0.0.0:$PORT'`, never double quotes.
+    PORT=8080 bin/run                 # or: docker compose up --build
+    open http://localhost:8080/
 
-## How the Lifecycle Works
+**Without docker** (needs the .NET 10 SDK on PATH)
 
-| Script | What it does | When to use |
-| --- | --- | --- |
-| `bin/run` | `INSTALL_CMD` → `BUILD_CMD` → `START_CMD` | Fleet deploy, fresh start |
-| `bin/start` | `START_CMD` only | Restart without rebuild |
-| `bin/restart` | stop + `bin/run` | After a code/dep change |
-| `bin/reload` | `RELOAD_CMD`, or stop+start if empty | After a config-only change |
-| `bin/stop` | Kill by pidfile or port | Tear down |
+    FLEET_RUNTIME=process PORT=8080 bin/run
+    # = dotnet restore src/BlazorApp/BlazorApp.csproj
+    #   dotnet publish src/BlazorApp/BlazorApp.csproj -c Release --no-restore -o .out
+    #   env PORT=8080 dotnet .out/BlazorApp.dll
 
-> The process PID is written to `.fleet/app.pid` so subsequent `stop`/`restart`
-> calls can find and terminate it reliably. If the pidfile is missing or stale,
-> `stop` falls back to freeing whatever is listening on `$PORT`.
+or, for development with hot reload: `dotnet watch --project src/BlazorApp`.
 
-## How to Apply This to Your Project
+| step | process runtime | docker runtime |
+|---|---|---|
+| install | `dotnet restore src/BlazorApp/BlazorApp.csproj` | — |
+| build | `dotnet publish … -o .out` | `docker compose build` |
+| start | `env PORT="$PORT" dotnet .out/BlazorApp.dll` | `docker compose up --remove-orphans` |
 
-### Step 1 — Copy the template into your repo
+## Deviations from the stock generator output, and why
 
-```sh
-cp -r fleet-template-v1/* my-project/
-```
+- **Project named `BlazorApp` under `src/BlazorApp/`.** Not the repo root: .NET writes build
+  output to the project's `bin/`/`obj/`, which would collide with the fleet's `bin/` scripts.
+  Not `App`: the template's root component is also `App`, and a project (namespace) named
+  `App` makes `_Imports.razor` fail to compile (CS0138 — `App` is a type, not a namespace).
+- **`Program.cs` binds `http://0.0.0.0:$PORT` when `PORT` is set**, read at runtime — ASP.NET
+  Core does not read `PORT` on its own. Without it, Kestrel keeps its usual defaults.
+- **`AddHealthChecks()` + `MapHealthChecks("/health")`** for the fleet's health probe.
+- **`UseHttpsRedirection()` only in Development.** On the fleet the edge terminates TLS and the
+  container speaks plain HTTP. `UseHsts()` stays: browsers see HTTPS at the edge.
+- **Dockerfile clears `ASPNETCORE_HTTP_PORTS`** (the aspnet image sets 8080), so Kestrel does not
+  warn that `UseUrls` overrides it.
+- Added: `Dockerfile`, `compose.yaml`, `.dockerignore`, a compact `.gitignore` (the stock
+  `dotnet new gitignore` ignores every `bin/` — including the fleet's), `.env.example`,
+  `fleet.conf`, `bin/`, `.github/workflows/`, `docs/fleet-lifecycle.md`.
+- No NuGet lock file: the generator does not create one.
 
-Or, if starting fresh, just clone it and work from `main`.
+Known, by design: the container logs a DataProtection warning that its keys live inside the
+container. Antiforgery tokens and circuits survive only as long as the container; persist the
+key ring (a volume, Redis, or a database) before relying on that across restarts or replicas.
 
-### Step 2 — Edit `fleet.conf` (the only required change)
+## Verified
 
-Fill in your stack's commands. Per-stack examples:
+**The docker runtime has NOT been verified yet.** On 2026-10-05 the shared docker host's disk
+stayed at 0-5G free (under the 6G floor for a build) for over five hours, so `docker compose build`
+was never run for this repo. Run the checks below once before trusting the image.
 
-```sh
-# Node.js
-INSTALL_CMD='npm ci'
-BUILD_CMD='npm run build'
-START_CMD='node dist/index.js'
+What did pass, inside `mcr.microsoft.com/dotnet/sdk:10.0` (.NET SDK 10.0.401):
 
-# Python (Gunicorn)
-INSTALL_CMD='pip install -r requirements.txt'
-BUILD_CMD=''
-START_CMD='gunicorn app:app --bind 0.0.0.0:$PORT'
+- `FLEET_RUNTIME=process PORT=46204 bin/run` → `/health` 200, `/` renders (`<title>Home</title>`),
+  `/counter` 200.
+- `migrate.py audit` → `READY`.
 
-# Go
-INSTALL_CMD=''
-BUILD_CMD='go build -o ./out/server ./cmd/server'
-START_CMD='./out/server'
-
-# Docker Compose
-INSTALL_CMD=''
-BUILD_CMD='docker compose build'
-START_CMD='docker compose up'
-RELOAD_CMD='docker compose up -d --no-build'
-```
-
-### Step 3 — Set local env vars in `.env` (gitignored)
-
-```sh
-APP_NAME=My App
-DATABASE_URL=postgres://localhost/mydb
-```
-
-### Step 4 — Verify standalone
-
-```sh
-PORT=3001 bin/run      # should install, build, and serve on 3001
-curl http://localhost:3001/   # should 200
-```
-
-### Step 5 — Connect to the fleet
-
-Point the fleet at your repo. It will clone it, inject `PORT` / `BASE_PATH` /
-`DATABASE_URL`, and call `bin/run`. As long as your `START_CMD` listens on
-`$PORT` and `HEALTH_PATH` returns 200, the fleet will mark the app healthy.
-
-## Key Invariants
-
-- **`START_CMD` must run in the foreground and listen on `$PORT`.** Do not use a
-  dev server — HMR / hot-reload chunks 404 behind the ingress and will break the
-  app.
-- **Never put secrets in `fleet.conf`** — it's committed. Use `.env` locally;
-  the fleet injects secrets via the environment.
-- **`bin/_common.sh` is shared infrastructure** — don't edit it per project. All
-  project-specific configuration belongs in `fleet.conf`.
+Still to run: `verify.sh <repo> <port>` (bin/run → /health 200, bin/restart, bin/stop → no containers).
